@@ -1,0 +1,17 @@
+name: ping-agent
+on: { workflow_dispatch: {} }
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /run
+        env:
+          AGENT_URL:   ${{ secrets.AGENT_URL }}
+          AGENT_TOKEN: ${{ secrets.AGENT_TOKEN }}
+        run: |
+          echo "POST $AGENT_URL"
+          curl -sS -o /dev/null -w "%{http_code}\n" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $AGENT_TOKEN" \
+            -d '{"issue_number":0,"title":"ping","body":"hello"}' \
+            "$AGENT_URL"
