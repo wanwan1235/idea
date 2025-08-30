@@ -6,53 +6,55 @@ on:
   workflow_dispatch:
     inputs:
       issue_number:
-        description: "テスト用: 対象 Issue 番号"
+        description: "Test issue number"
         required: true
-        type: number
+        type: string
 
 permissions:
-  issues: write
   contents: write
+  issues: write
 
 jobs:
   run:
-    # 手動起動 もしくは コメント本文に /agent run を含むときだけ実行
-    if: |
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '/agent run'))
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'issue_comment' && contains(github.event.comment.body, '/agent run')) }}
     runs-on: ubuntu-latest
 
     steps:
-      # デバッグ: どのイベントで来たか/コメント本文は何か
       - name: Debug event
         run: |
-          echo "event=${{ github.event_name }}"
-          echo "issue=${{ github.event.issue.number || inputs.issue_number }}"
-          echo "::notice title=comment.body::${{ toJSON(github.event.comment.body) }}"
+          echo "event=${GITHUB_EVENT_NAME}"
+          echo "payload:"
+          cat "$GITHUB_EVENT_PATH"
 
       - uses: actions/checkout@v4
 
-      # 手動起動時は GH CLI で Issue 本文/タイトルを取得して補完
+      - name: Resolve issue number
+        id: resolve
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "num=${{ inputs.issue_number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "num=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build payload JSON
         id: prep
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            NUM=${{ inputs.issue_number }}
-          else
-            NUM=${{ github.event.issue.number }}
-          fi
-          TITLE=$(gh issue view $NUM --json title -q .title)
-          BODY=$(gh issue view $NUM --json body  -q .body)
-          LABELS=$(gh issue view $NUM --json labels -q '.labels[].name' | jq -R -s 'split("\n")[:-1]')
-          jq -n --argjson num "$NUM" \
-                --arg title "$TITLE" --arg body "$BODY" \
-                --arg owner "${{ github.repository_owner }}" \
-                --arg repo  "${{ github.repository }}" \
-                --argjson labels "$LABELS" \
-                '{issue_number:$num,title:$title,body:$body,owner:$owner,repo:$repo,labels:$labels,prefer_language:"ja"}' \
-                > payload.json
+          NUM="${{ steps.resolve.outputs.num }}"
+          TITLE=$(gh issue view "$NUM" --json title -q .title)
+          BODY=$(gh issue view "$NUM" --json body -q .body)
+          LABELS=$(gh issue view "$NUM" --json labels -q '.labels[].name' | jq -R -s 'split("\n")[:-1]')
+          jq -n \
+            --argjson num "$NUM" \
+            --arg title "$TITLE" \
+            --arg body "$BODY" \
+            --arg owner "${{ github.repository_owner }}" \
+            --arg repo  "${{ github.repository }}" \
+            --argjson labels "$LABELS" \
+            '{issue_number:($num|tonumber), title:$title, body:$body, owner:$owner, repo:$repo, labels:$labels, prefer_language:"ja"}' \
+            > payload.json
 
       - name: Call external agent
         id: call
@@ -60,34 +62,37 @@ jobs:
           AGENT_URL:   ${{ secrets.AGENT_URL }}
           AGENT_TOKEN: ${{ secrets.AGENT_TOKEN }}
         run: |
+          echo "POST $AGENT_URL"
           http_code=$(curl -sS -w "%{http_code}" -o agent_response.json \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $AGENT_TOKEN" \
             -X POST "$AGENT_URL" --data-binary @payload.json)
           echo "HTTP $http_code"
           test "$http_code" = "200" || (echo "Agent error:" && cat agent_response.json && exit 1)
-          mkdir -p docs/ISSUE-${{ github.event.issue.number || inputs.issue_number }}
-          jq -r '.summary_md' agent_response.json > docs/ISSUE-${{ github.event.issue.number || inputs.issue_number }}/summary.md
-          echo "status=$(jq -r '.suggest_status // "Summary"' agent_response.json)" >> $GITHUB_OUTPUT
+          mkdir -p "docs/ISSUE-${{ steps.resolve.outputs.num }}"
+          jq -r '.summary_md' agent_response.json > "docs/ISSUE-${{ steps.resolve.outputs.num }}/summary.md"
+          echo "status=$(jq -r '.suggest_status // "Summary"' agent_response.json)" >> "$GITHUB_OUTPUT"
 
       - name: Commit summary
         run: |
           git config user.name "agent-bot"
           git config user.email "bot@local"
           git add docs
-          git commit -m "agent: summary for #${{ github.event.issue.number || inputs.issue_number }}" || true
+          git commit -m "agent: summary for #${{ steps.resolve.outputs.num }}" || true
           git push || true
 
       - name: Comment digest
-        env: { GH_TOKEN: ${{ github.token }} }
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          NUM=${{ github.event.issue.number || inputs.issue_number }}
+          NUM="${{ steps.resolve.outputs.num }}"
           gh issue comment "$NUM" -b "✅ 要約を \`docs/ISSUE-$NUM/summary.md\` に保存しました"
 
       - name: Ensure stage label (re-fire labeled)
-        env: { GH_TOKEN: ${{ secrets.PROJECTS_TOKEN }} }
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_TOKEN }}   # PAT (scopes: repo, project)
         run: |
-          NUM=${{ github.event.issue.number || inputs.issue_number }}
+          NUM="${{ steps.resolve.outputs.num }}"
           case "${{ steps.call.outputs.status }}" in
             Research) L="stage:research" ;;
             Plan)     L="stage:plan" ;;
