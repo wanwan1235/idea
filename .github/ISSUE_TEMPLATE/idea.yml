@@ -1,0 +1,14 @@
+name: New Idea
+description: 新規企画アイデア
+title: "[Idea] "
+labels: ["type:idea","stage:research"]
+body:
+  - type: input
+    id: customer
+    attributes: { label: 想定顧客 }
+  - type: textarea
+    id: problem
+    attributes: { label: 顧客課題 }
+  - type: textarea
+    id: solution
+    attributes: { label: 仮ソリューション }
