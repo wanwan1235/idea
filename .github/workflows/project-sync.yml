@@ -1,0 +1,10 @@
+name: project-sync
+on:
+  issues:
+    types: [labeled, opened]
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log
+        run: echo "Projects連携は後で設定します（まずは動作確認）"
