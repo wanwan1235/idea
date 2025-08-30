@@ -1,10 +1,67 @@
 name: project-sync
 on:
   issues:
-    types: [labeled, opened]
+    types: [opened, labeled]
+
 jobs:
-  ping:
+  sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Log
-        run: echo "Projects連携は後で設定します（まずは動作確認）"
+      - uses: actions/github-script@v7
+        env:
+          OWNER: ${{ github.repository_owner }}   # 個人アカならこれでOK
+          PROJECT_NUMBER: 1                       # ← ここをあなたの番号に！
+          STATUS_FIELD: Status
+        with:
+          script: |
+            const owner = process.env.OWNER;
+            const projectNumber = parseInt(process.env.PROJECT_NUMBER, 10);
+            const label = context.payload.label ? context.payload.label.name : null;
+
+            // ラベル→Statusの対応
+            const map = {
+              "stage:research": "Research",
+              "stage:summary":  "Summary",
+              "stage:plan":     "Plan",
+              "stage:review":   "Review",
+              "stage:done":     "Done"
+            };
+
+            // Project取得（User or Org）
+            const q = await github.graphql(`
+              query($owner:String!, $num:Int!){
+                user(login:$owner){ projectV2(number:$num){ id fields(first:50){nodes{id name}} } }
+                organization(login:$owner){ projectV2(number:$num){ id fields(first:50){nodes{id name}} } }
+              }`, { owner, num: projectNumber }
+            );
+            const proj = (q.user && q.user.projectV2) || (q.organization && q.organization.projectV2);
+            if (!proj) throw new Error('Project not found');
+            const projectId = proj.id;
+            const fields = proj.fields.nodes;
+            const issueNodeId = context.payload.issue.node_id;
+
+            // プロジェクトにアイテム追加（冪等）
+            const add = await github.graphql(`
+              mutation($projectId:ID!, $contentId:ID!){
+                addProjectV2ItemById(input:{projectId:$projectId, contentId:$contentId}){ item { id } }
+              }`, { projectId, contentId: issueNodeId }
+            );
+            const itemId = add.addProjectV2ItemById.item.id;
+
+            // ラベルに応じてStatus更新
+            if (label && map[label]) {
+              const statusField = fields.find(f => f.name === process.env.STATUS_FIELD);
+              const optRes = await github.graphql(`
+                query($fid:ID!){ node(id:$fid){ ... on ProjectV2SingleSelectField { options { id name } } } }
+              `, { fid: statusField.id });
+              const opt = optRes.node.options.find(o => o.name === map[label]);
+              await github.graphql(`
+                mutation($projectId:ID!,$itemId:ID!,$fieldId:ID!,$opt:String!){
+                  updateProjectV2ItemFieldValue(input:{
+                    projectId:$projectId, itemId:$itemId, fieldId:$fieldId,
+                    value:{ singleSelectOptionId:$opt }
+                  }){ projectV2Item { id } }
+                }`, { projectId, itemId, fieldId: statusField.id, opt: opt.id }
+              );
+            }
+
