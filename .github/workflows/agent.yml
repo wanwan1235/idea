@@ -28,7 +28,7 @@ jobs:
 
       - name: Ensure label (re-fire labeled)
         env:
-          GH_TOKEN: ${{ secrets.PROJECTS_TOKEN }}   # ← GITHUB_TOKENではなくPATを使用
+          GH_TOKEN: ${{ secrets.PROJECTS_TOKEN }}   # PAT（scopes: repo, project）
         run: |
           gh issue edit ${{ github.event.issue.number }} --remove-label "stage:summary" || true
           gh issue edit ${{ github.event.issue.number }} --add-label "stage:summary"
