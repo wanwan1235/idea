@@ -2,34 +2,79 @@ name: agent-run
 on:
   issue_comment:
     types: [created]
+
 permissions:
   issues: write
   contents: write
+
 jobs:
   run:
     if: contains(github.event.comment.body, '/agent run')
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
-      - name: Stub agent (demo)
+
+      - name: Build payload JSON
+        id: prep
         run: |
-          num='${{ github.event.issue.number }}'
-          mkdir -p docs/ISSUE-$num
-          echo "# Demo summary for #$num" > docs/ISSUE-$num/summary.md
-          git config user.name "agent-bot"
-          git config user.email "bot@local"
-          git add docs
-          git commit -m "agent: summary for #$num" || true
-          git push || true
-      - name: Comment digest
-        run: gh issue comment ${{ github.event.issue.number }} -b "✅ 要約を docs/ISSUE-${{ github.event.issue.number }}/summary.md に保存しました"
+          jq -n \
+            --argjson num ${{ github.event.issue.number }} \
+            --arg title   "${{ github.event.issue.title }}" \
+            --arg body    "${{ github.event.issue.body }}" \
+            --arg owner   "${{ github.repository_owner }}" \
+            --arg repo    "${{ github.repository }}" \
+            --argjson labels "$(gh issue view ${{ github.event.issue.number }} --json labels -q '.labels[].name' | jq -R -s 'split("\n")[:-1]')" \
+            '{issue_number:$num, title:$title, body:$body, owner:$owner, repo:$repo, labels:$labels, prefer_language:"ja"}' \
+            > payload.json
         env:
           GH_TOKEN: ${{ github.token }}
 
-      - name: Ensure label (re-fire labeled)
+      - name: Call external agent
+        id: call
         env:
-          GH_TOKEN: ${{ secrets.PROJECTS_TOKEN }}   # PAT（scopes: repo, project）
+          AGENT_URL:    ${{ secrets.AGENT_URL }}
+          AGENT_TOKEN:  ${{ secrets.AGENT_TOKEN }}
         run: |
-          gh issue edit ${{ github.event.issue.number }} --remove-label "stage:summary" || true
-          gh issue edit ${{ github.event.issue.number }} --add-label "stage:summary"
+          echo "POST $AGENT_URL"
+          http_code=$(curl -sS -w "%{http_code}" -o agent_response.json \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $AGENT_TOKEN" \
+            -X POST "$AGENT_URL" --data-binary @payload.json)
 
+          echo "HTTP $http_code"
+          test "$http_code" = "200" || (echo "Agent error:" && cat agent_response.json && exit 1)
+
+          mkdir -p docs/ISSUE-${{ github.event.issue.number }}
+          jq -r '.summary_md' agent_response.json > docs/ISSUE-${{ github.event.issue.number }}/summary.md
+          echo "status=$(jq -r '.suggest_status // "Summary"' agent_response.json)" >> $GITHUB_OUTPUT
+
+      - name: Commit summary
+        run: |
+          git config user.name "agent-bot"
+          git config user.email "bot@local"
+          git add docs/ISSUE-${{ github.event.issue.number }}/summary.md
+          git commit -m "agent: summary for #${{ github.event.issue.number }}" || true
+          git push || true
+
+      - name: Comment digest
+        run: |
+          URL="docs/ISSUE-${{ github.event.issue.number }}/summary.md"
+          gh issue comment ${{ github.event.issue.number }} -b "✅ 要約を \`$URL\` に保存しました"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      # 返却された suggest_status に応じて stage:* ラベルを再付与（PATで発火）
+      - name: Ensure stage label (re-fire labeled)
+        env:
+          GH_TOKEN: ${{ secrets.PROJECTS_TOKEN }}
+        run: |
+          case "${{ steps.call.outputs.status }}" in
+            Research) L="stage:research" ;;
+            Plan)     L="stage:plan" ;;
+            *)        L="stage:summary" ;;
+          esac
+          gh issue edit ${{ github.event.issue.number }} --remove-label "stage:research" || true
+          gh issue edit ${{ github.event.issue.number }} --remove-label "stage:summary" || true
+          gh issue edit ${{ github.event.issue.number }} --remove-label "stage:plan"     || true
+          gh issue edit ${{ github.event.issue.number }} --add-label "$L"
